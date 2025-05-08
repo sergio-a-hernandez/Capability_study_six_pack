@@ -1,0 +1,206 @@
+---
+title: "Six-Pack Capability Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+install_if_missing <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Lista de paquetes necesarios
+required_packages <- c("ggplot2", "qcc", "fitdistrplus", "car", "gridExtra", "patchwork", "knitr", "nortest")
+
+# Instalar los que falten
+invisible(lapply(required_packages, install_if_missing))
+
+# Cargar paquetes
+lapply(required_packages, library, character.only = TRUE)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Load Data
+
+```{r load_data, echo = FALSE}
+# Read data files
+load_file_if_exists <- function(csv_file) {
+  if (!file.exists(csv_file)) {
+    stop(paste("The data file", csv_file, "doesn't exist in the current directory."))
+  }
+  
+  data <- tryCatch(
+    read.csv(csv_file),
+    error = function(e) {
+      message("Error reading file: ", e$message)
+      return(NULL)
+    }
+  )
+  return(data)
+}
+
+# Load measurement data
+measurements <- load_file_if_exists("measurements.csv")
+
+# Load specifications
+specs <- load_file_if_exists("specifications.csv")
+
+# Data verification
+if (is.null(measurements) || nrow(measurements) < 125 || !"Measurement" %in% colnames(measurements)) {
+  stop("Error: The file 'measurements.csv' must contain at least 125 rows and a column named 'Measurement'.")
+}
+
+if (is.null(specs) || !all(c("Nominal", "LSL", "USL") %in% colnames(specs))) {
+  stop("Error: The file 'specifications.csv' must contain all three columns: 'Nominal', 'LSL', and 'USL'.")
+}
+
+data_check <- data.frame(
+  File = c("measurements.csv", "specifications.csv"),
+  Status = c("Loaded successfully", "Loaded successfully")
+)
+
+knitr::kable(data_check, caption = "Data Load Status")
+```
+
+## 2. X-bar and R Chart
+
+```{r xr_chart, echo = FALSE}
+# Split into subgroups (matrix: 25 rows, 5 columns)
+subgroups <- t(matrix(measurements$Measurement, ncol = 5, byrow = TRUE))
+xbar_r_chart <- qcc::qcc(data = subgroups, type = "xbar", plot = TRUE)
+```
+
+## 3. Histogram with Normal Curve
+
+```{r histogram, echo = FALSE}
+mean_val <- mean(measurements$Measurement)
+sd_val <- sd(measurements$Measurement)
+
+hist_plot <- ggplot(measurements, aes(x = Measurement)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 20, fill = "skyblue", color = "black") +
+  stat_function(fun = dnorm, args = list(mean = mean_val, sd = sd_val), color = "red", lwd = 1) +
+  theme_minimal() +
+  ggtitle("Histogram with Normal Curve")
+hist_plot
+```
+
+## 4. Normal Probability Plot
+
+```{r normal_probability_plot, echo = FALSE}
+qq_plot <- ggplot(measurements, aes(sample = Measurement)) +
+  stat_qq() +
+  stat_qq_line(color = "red") +
+  coord_flip() +  # Invert axes
+  theme_minimal() +
+  ggtitle("Normal Probability Plot")
+qq_plot
+
+# Shapiro-Wilk Test (for n <= 5000)
+shapiro <- shapiro.test(measurements$Measurement)
+
+# Anderson-Darling Test
+ad <- ad.test(measurements$Measurement)
+
+# Create summary table
+normality_results <- data.frame(
+  Test = c("Shapiro-Wilk", "Anderson-Darling"),
+  Statistic = round(c(shapiro$statistic, ad$statistic), 4),
+  P_Value = round(c(shapiro$p.value, ad$p.value), 4),
+  Conclusion = ifelse(c(shapiro$p.value, ad$p.value) > 0.05,
+                      "Normal (Fail to reject H₀)",
+                      "Not Normal (Reject H₀)")
+)
+
+knitr::kable(normality_results, caption = "Normality Tests Results")
+```
+
+## 5. Boxplot
+
+```{r boxplot, echo = FALSE}
+box_plot <- ggplot(measurements, aes(x = "", y = Measurement)) +
+  geom_boxplot(fill = "lightgreen") +
+  theme_minimal() +
+  ggtitle("Boxplot")
+box_plot
+```
+
+## 6. Process Capability Plot
+
+```{r process_capability_plot, echo = FALSE}
+lsl <- specs$LSL[1]
+usl <- specs$USL[1]
+
+cap_result <- process.capability(object = xbar_r_chart, spec.limits = c(lsl, usl))
+```
+
+## 7. Capability Indices
+
+```{r capability_indices, echo = FALSE}
+# Cp and Cpk from qcc::process.capability
+cp  <- cap_result$indices[1]
+cpl <- cap_result$indices[2]
+cpu <- cap_result$indices[3]
+cpk <- cap_result$indices[4]
+cpm <- cap_result$indices[5]
+cexpl <- cap_result$exp[1]
+cexpu <- cap_result$exp[2]
+cobsl <- cap_result$obs[1]
+cobsu <- cap_result$obs[2]
+
+
+
+# Pp and Ppk using overall (global) standard deviation
+pp <- (usl - lsl) / (6 * sd_val)
+ppl <- (mean_val - lsl) / (3 * sd_val)
+ppu <- (usl - mean_val) / (3 * sd_val)
+ppk <- min((usl - mean_val), (mean_val - lsl)) / (3 * sd_val)
+pexpl <- pnorm(lsl, mean = mean_val, sd = sd_val) * 100
+pexpu <- (1 - pnorm(usl, mean = mean_val, sd = sd_val)) * 100
+
+# Data frame of capability indices
+cap_indices <- data.frame(
+  Index = c("Cp", "Cpl", "Cpu", "Cpk", "Cpm", "Exp<LSL", "Exp<USL", "Obs<LSL", "Obs<USL", "Pp", "Ppl", "Ppu", "Ppk", "Exp<LSL", "Exp<USL"),
+  Value = round(c(cp, cpl, cpu, cpk, cpm, cexpl, cexpu, cobsl, cobsu, pp, ppl, ppu, ppk, pexpl, pexpu), 4)
+)
+
+knitr::kable(cap_indices, caption = "Capability Indices")
+```
+
+## 8. Conclusions
+```{r conclusions, echo=FALSE}
+# Crear tabla de conclusiones
+conclusions_df <- data.frame(
+  Metric = c("Cpk", "Ppk", "Shapiro-Wilk p-value", "Anderson-Darling p-value"),
+  Value = c(round(cpk, 4), round(ppk, 4), round(shapiro$p.value, 4), round(ad$p.value, 4)),
+  Interpretation = c(
+    if (cpk > 1.67) {
+      "Meets acceptance criteria"
+    } else if (cpk >= 1.33) {
+      "May be acceptable; Customer review required"
+    } else {
+      "Does not meet criteria; Customer review required"
+    },
+    if (ppk > 1.67) {
+      "Meets acceptance criteria"
+    } else if (ppk >= 1.33) {
+      "May be acceptable; Customer review required"
+    } else {
+      "Does not meet criteria; Customer review required"
+    },
+    if (shapiro$p.value > 0.05) {
+      "Data appears normal"
+    } else {
+      "Data may not be normal"
+    },
+    if (ad$p.value > 0.05) {
+      "Data appears normal"
+    } else {
+      "Data may not be normal"
+    }
+  )
+)
+
+knitr::kable(conclusions_df, caption = "Capability and Normality Assessment Summary")
+```
